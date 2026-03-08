@@ -20,8 +20,8 @@ func main() {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"message":   "Hello from the test server!",
-			"version":   "1.0.0",
+			"message":   Greeting(),
+			"version":   Version(),
 			"timestamp": time.Now().Format(time.RFC3339),
 		})
 	})
