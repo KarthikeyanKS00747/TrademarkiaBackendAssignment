@@ -3,6 +3,7 @@ package process
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -77,6 +78,16 @@ func terminateJob(job windows.Handle) error {
 // platformKillProcessTree kills a process tree on Windows using taskkill as fallback.
 func platformKillProcessTree(pid int) error {
 	return killProcessTreeWindows(pid)
+}
+
+// killProcessTreeWindows uses taskkill /T to terminate the entire process tree.
+func killProcessTreeWindows(pid int) error {
+	cmd := exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprintf("%d", pid))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("taskkill failed: %w, output: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 // setupJobObject creates a Job Object and assigns the given process to it.

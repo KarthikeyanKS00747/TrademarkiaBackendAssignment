@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 )
@@ -20,6 +19,7 @@ type Manager struct {
 	running   *exec.Cmd
 	cancel    context.CancelFunc // cancel for the running server process
 	done      chan struct{}       // closed when the running process exits
+	streamWg  sync.WaitGroup     // tracks output streaming goroutines
 	jobHandle uintptr            // Windows Job Object handle (0 on Unix)
 }
 
@@ -92,13 +92,23 @@ func (m *Manager) Start(execCmd string) error {
 	m.done = done
 	m.logger.Info("server started", "pid", cmd.Process.Pid, "cmd", execCmd)
 
-	// Stream output in real-time
-	go streamOutput(stdout, os.Stdout, m.logger)
-	go streamOutput(stderr, os.Stderr, m.logger)
+	// Stream output in real-time with WaitGroup tracking
+	m.streamWg.Add(2)
+	go func() {
+		defer m.streamWg.Done()
+		streamOutput(stdout, os.Stdout, m.logger)
+	}()
+	go func() {
+		defer m.streamWg.Done()
+		streamOutput(stderr, os.Stderr, m.logger)
+	}()
 
 	// Wait for process to complete in background
 	go func() {
 		err := cmd.Wait()
+		// Wait for stream goroutines to flush all output
+		m.streamWg.Wait()
+
 		m.mu.Lock()
 		if m.running == cmd {
 			m.running = nil
@@ -203,14 +213,4 @@ func streamOutput(r io.ReadCloser, w io.Writer, logger *slog.Logger) {
 // killProcessTree kills a process and all its children.
 func killProcessTree(pid int) error {
 	return platformKillProcessTree(pid)
-}
-
-func killProcessTreeWindows(pid int) error {
-	// On Windows, use taskkill /T to kill the process tree
-	cmd := exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprintf("%d", pid))
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("taskkill failed: %w, output: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
 }
