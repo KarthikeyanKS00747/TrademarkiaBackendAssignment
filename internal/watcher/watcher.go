@@ -2,11 +2,14 @@ package watcher
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -213,8 +216,18 @@ func (w *Watcher) walkAndWatch(root string) error {
 		}
 
 		if err := w.fsWatcher.Add(path); err != nil {
+			// Detect OS-level watch limit errors and provide actionable guidance.
+			if isWatchLimitError(err) {
+				w.logger.Error("OS watch limit reached — cannot watch more directories",
+					"path", path,
+					"error", err,
+					"hint_linux", "increase limit: echo 524288 | sudo tee /proc/sys/fs/inotify/max_user_watches",
+					"hint_macos", "increase limit: sudo sysctl -w kern.maxfiles=524288",
+				)
+				return fmt.Errorf("watch limit reached: %w", err)
+			}
 			w.logger.Warn("failed to watch directory", "path", path, "error", err)
-			return nil // Don't stop walking on watch errors
+			return nil // Don't stop walking on other watch errors
 		}
 
 		w.watched[path] = true
@@ -263,4 +276,25 @@ func (w *Watcher) WatchedDirCount() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return len(w.watched)
+}
+
+// EventsChan returns the channel of changed file paths (implements FileWatcher).
+func (w *Watcher) EventsChan() <-chan string {
+	return w.Events
+}
+
+// isWatchLimitError returns true if the error indicates the OS inotify/kqueue
+// watch limit has been reached.
+func isWatchLimitError(err error) bool {
+	// Linux: ENOSPC means inotify watch limit exceeded
+	// macOS: EMFILE means too many open file descriptors
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno == syscall.ENOSPC || errno == syscall.EMFILE
+	}
+	// Fallback: check the error message for common patterns
+	msg := err.Error()
+	return strings.Contains(msg, "too many open files") ||
+		strings.Contains(msg, "no space left on device") ||
+		strings.Contains(msg, "inotify_add_watch")
 }
