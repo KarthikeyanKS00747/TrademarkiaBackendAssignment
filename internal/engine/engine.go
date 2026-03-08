@@ -115,6 +115,9 @@ func (e *Engine) Run(ctx context.Context) error {
 
 		case _, ok := <-e.watcher.EventsChan():
 			if !ok {
+				if buildCancel != nil {
+					buildCancel()
+				}
 				return nil
 			}
 
@@ -146,6 +149,9 @@ func (e *Engine) Run(ctx context.Context) error {
 					// Cooldown complete, proceed with build
 				case <-ctx.Done():
 					cooldownTimer.Stop()
+					if buildCancel != nil {
+						buildCancel()
+					}
 					return nil
 				}
 			}
