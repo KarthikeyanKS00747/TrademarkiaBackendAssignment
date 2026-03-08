@@ -11,6 +11,22 @@ import (
 	"github.com/hotreload/internal/watcher"
 )
 
+// FileWatcher abstracts the watcher for testability.
+type FileWatcher interface {
+	Start(ctx context.Context) error
+	Close() error
+	WatchedDirCount() int
+	EventsChan() <-chan string
+}
+
+// ProcessManager abstracts process management for testability.
+type ProcessManager interface {
+	Build(ctx context.Context, buildCmd string) error
+	Start(execCmd string) error
+	Stop() error
+	IsRunning() bool
+}
+
 // Config holds the configuration for the hot reload engine.
 type Config struct {
 	Root       string
@@ -24,8 +40,11 @@ type Config struct {
 type Engine struct {
 	cfg     Config
 	logger  *slog.Logger
-	watcher *watcher.Watcher
-	proc    *process.Manager
+	watcher FileWatcher
+	proc    ProcessManager
+
+	// Build serialization: ensures only one buildAndRestart runs at a time.
+	buildMu sync.Mutex
 
 	// Crash loop detection
 	crashMu        sync.Mutex
@@ -73,16 +92,18 @@ func (e *Engine) Run(ctx context.Context) error {
 		"watched_dirs", e.watcher.WatchedDirCount(),
 	)
 
-	// Trigger first build immediately
-	e.buildAndRestart(ctx)
+	// Trigger first build immediately (in a goroutine so ctx.Done is responsive)
+	var buildCancel context.CancelFunc
+	{
+		var buildCtx context.Context
+		buildCtx, buildCancel = context.WithCancel(ctx)
+		go e.buildAndRestart(buildCtx)
+	}
 
 	// Debounce timer
 	debounce := time.Duration(e.cfg.DebounceMs) * time.Millisecond
 	var timer *time.Timer
 	var timerC <-chan time.Time // nil channel blocks forever
-
-	// Build cancellation
-	var buildCancel context.CancelFunc
 
 	for {
 		select {
@@ -92,7 +113,7 @@ func (e *Engine) Run(ctx context.Context) error {
 			}
 			return nil
 
-		case _, ok := <-e.watcher.Events:
+		case _, ok := <-e.watcher.EventsChan():
 			if !ok {
 				return nil
 			}
@@ -114,26 +135,41 @@ func (e *Engine) Run(ctx context.Context) error {
 			timerC = nil
 			timer = nil
 
-			// Check crash loop protection
+			// Check crash loop protection (non-blocking, uses a timer in select)
 			if e.inCrashLoop() {
 				e.logger.Warn("crash loop detected, cooling down",
 					"cooldown", e.crashCooldown)
-				time.Sleep(e.crashCooldown)
+				// Use a timer so we can still respond to ctx.Done during cooldown
+				cooldownTimer := time.NewTimer(e.crashCooldown)
+				select {
+				case <-cooldownTimer.C:
+					// Cooldown complete, proceed with build
+				case <-ctx.Done():
+					cooldownTimer.Stop()
+					return nil
+				}
 			}
 
 			// Create a cancellable context for this build cycle
 			var buildCtx context.Context
 			buildCtx, buildCancel = context.WithCancel(ctx)
-			go func(bCtx context.Context, bCancel context.CancelFunc) {
-				e.buildAndRestart(bCtx)
-				// Don't nil buildCancel here - let the main loop manage it
-				_ = bCancel
-			}(buildCtx, buildCancel)
+			go e.buildAndRestart(buildCtx)
 		}
 	}
 }
 
+// buildAndRestart stops the old server, rebuilds, and starts the new server.
+// It acquires buildMu to ensure only one build cycle runs at a time.
 func (e *Engine) buildAndRestart(ctx context.Context) {
+	// Serialize build cycles: wait for any previous build to finish
+	e.buildMu.Lock()
+	defer e.buildMu.Unlock()
+
+	// Check if already cancelled before starting work
+	if ctx.Err() != nil {
+		return
+	}
+
 	// Stop the previous server first
 	if err := e.proc.Stop(); err != nil {
 		e.logger.Warn("error stopping previous server", "error", err)
