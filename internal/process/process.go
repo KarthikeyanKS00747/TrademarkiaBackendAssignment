@@ -18,7 +18,7 @@ type Manager struct {
 	mu        sync.Mutex
 	running   *exec.Cmd
 	cancel    context.CancelFunc // cancel for the running server process
-	done      chan struct{}       // closed when the running process exits
+	done      chan struct{}      // closed when the running process exits
 	streamWg  sync.WaitGroup     // tracks output streaming goroutines
 	jobHandle uintptr            // Windows Job Object handle (0 on Unix)
 }

@@ -27,8 +27,8 @@ func (w *mockWatcher) Close() error {
 	w.once.Do(func() { close(w.events) })
 	return nil
 }
-func (w *mockWatcher) WatchedDirCount() int            { return w.dirs }
-func (w *mockWatcher) EventsChan() <-chan string        { return w.events }
+func (w *mockWatcher) WatchedDirCount() int      { return w.dirs }
+func (w *mockWatcher) EventsChan() <-chan string { return w.events }
 
 // ---------- mock process manager ----------
 
