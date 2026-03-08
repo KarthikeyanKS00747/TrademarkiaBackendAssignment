@@ -37,3 +37,12 @@ func platformKillProcessTree(pid int) error {
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	return nil
 }
+
+// setupJobObject is a no-op on Unix (Job Objects are Windows-only).
+func (m *Manager) setupJobObject(pid int) error {
+	return nil
+}
+
+// terminateJobObject is a no-op on Unix.
+func (m *Manager) terminateJobObject() {
+}

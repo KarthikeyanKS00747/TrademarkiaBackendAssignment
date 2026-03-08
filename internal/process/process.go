@@ -15,10 +15,12 @@ import (
 
 // Manager handles building and running processes, ensuring proper lifecycle.
 type Manager struct {
-	logger  *slog.Logger
-	mu      sync.Mutex
-	running *exec.Cmd
-	cancel  context.CancelFunc // cancel for the running server process
+	logger    *slog.Logger
+	mu        sync.Mutex
+	running   *exec.Cmd
+	cancel    context.CancelFunc // cancel for the running server process
+	done      chan struct{}       // closed when the running process exits
+	jobHandle uintptr            // Windows Job Object handle (0 on Unix)
 }
 
 // New returns a new process Manager.
@@ -77,7 +79,17 @@ func (m *Manager) Start(execCmd string) error {
 		return fmt.Errorf("failed to start server: %w", err)
 	}
 
+	// On Windows, assign the process to a Job Object so we can kill
+	// the entire process tree (including grandchildren) reliably.
+	if runtime.GOOS == "windows" {
+		if err := m.setupJobObject(cmd.Process.Pid); err != nil {
+			m.logger.Warn("failed to set up job object, falling back to taskkill", "error", err)
+		}
+	}
+
 	m.running = cmd
+	done := make(chan struct{})
+	m.done = done
 	m.logger.Info("server started", "pid", cmd.Process.Pid, "cmd", execCmd)
 
 	// Stream output in real-time
@@ -92,6 +104,7 @@ func (m *Manager) Start(execCmd string) error {
 			m.running = nil
 		}
 		m.mu.Unlock()
+		close(done)
 
 		if err != nil && ctx.Err() == nil {
 			m.logger.Warn("server process exited with error", "error", err)
@@ -108,8 +121,10 @@ func (m *Manager) Stop() error {
 	m.mu.Lock()
 	cmd := m.running
 	cancel := m.cancel
+	done := m.done
 	m.running = nil
 	m.cancel = nil
+	m.done = nil
 	m.mu.Unlock()
 
 	if cmd == nil || cmd.Process == nil {
@@ -123,27 +138,24 @@ func (m *Manager) Stop() error {
 		cancel()
 	}
 
-	// Kill the process group (includes child processes)
-	if err := killProcessTree(cmd.Process.Pid); err != nil {
+	// Use Job Object on Windows if available, otherwise fall back to process tree kill
+	if runtime.GOOS == "windows" && m.jobHandle != 0 {
+		m.terminateJobObject()
+	} else if err := killProcessTree(cmd.Process.Pid); err != nil {
 		m.logger.Warn("failed to kill process tree, attempting force kill", "error", err)
-		// Fallback: force kill just the main process
 		_ = cmd.Process.Kill()
 	}
 
-	// Wait for the process to fully terminate with timeout
-	done := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		m.logger.Debug("server stopped successfully")
-	case <-time.After(5 * time.Second):
-		m.logger.Warn("server did not stop in time, force killing")
-		_ = cmd.Process.Kill()
-		<-done
+	// Wait for the process to fully terminate using the done channel from Start()
+	if done != nil {
+		select {
+		case <-done:
+			m.logger.Debug("server stopped successfully")
+		case <-time.After(5 * time.Second):
+			m.logger.Warn("server did not stop in time, force killing")
+			_ = cmd.Process.Kill()
+			<-done
+		}
 	}
 
 	return nil
