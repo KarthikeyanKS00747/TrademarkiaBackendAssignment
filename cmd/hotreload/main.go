@@ -51,11 +51,11 @@ func main() {
 	slog.SetDefault(logger)
 
 	cfg := engine.Config{
-		Root:         *root,
-		BuildCmd:     *build,
-		ExecCmd:      *exec,
-		DebounceMs:   *debounceMs,
-		Extensions:   *extensions,
+		Root:       *root,
+		BuildCmd:   *build,
+		ExecCmd:    *exec,
+		DebounceMs: *debounceMs,
+		Extensions: *extensions,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
